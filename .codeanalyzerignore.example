@@ -1,0 +1,55 @@
+# Example .codeanalyzerignore file
+# This file works similar to .gitignore
+# Lines starting with # are comments
+
+# Common files to ignore
+*.min.js
+*.min.css
+*.map
+*.lock
+*.log
+
+# Dependencies and build artifacts
+node_modules/*
+bower_components/*
+dist/*
+build/*
+target/*
+out/*
+bin/*
+obj/*
+
+# Python specific
+__pycache__/*
+*.pyc
+*.pyo
+*.pyd
+.env/*
+.venv/*
+venv/*
+env/*
+
+# Java specific
+*.class
+*.jar
+*.war
+target/*
+.gradle/*
+
+# IDE and editor files
+.idea/*
+.vscode/*
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Documentation and generated files
+docs/_build/*
+site/*
+coverage/*
+.coverage
+htmlcov/*
+
+# Custom ignores (add your own patterns here)
+# example_pattern/* 

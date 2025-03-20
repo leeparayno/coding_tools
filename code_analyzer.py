@@ -19,18 +19,113 @@ import argparse
 import tiktoken
 from pathlib import Path
 from collections import defaultdict
+import fnmatch
 
 # Default file extensions to analyze
 DEFAULT_EXTENSIONS = [
     '.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.c', '.cpp', '.h', '.hpp',
     '.cs', '.go', '.rb', '.php', '.swift', '.kt', '.rs', '.scala', '.sh',
-    '.html', '.css', '.scss', '.sass', '.less', '.json', '.yml', '.yaml', '.md'
+    '.html', '.css', '.scss', '.sass', '.less', '.json', '.yml', '.yaml', '.md',
+    '.dart'  # Adding Dart extension
 ]
+
+# Default ignore patterns for different tech stacks
+DEFAULT_IGNORE_PATTERNS = {
+    'common': [
+        '*.min.js',
+        '*.min.css',
+        '*.map',
+        '*.lock',
+        '*.log',
+        '*.pot',
+        '*.mo',
+        '*.pyc',
+        '__pycache__/*',
+        '.git/*',
+        '.svn/*',
+        '.hg/*',
+        '.DS_Store',
+        'Thumbs.db'
+    ],
+    'node': [
+        'package-lock.json',
+        'yarn.lock',
+        'pnpm-lock.yaml',
+        'node_modules/*',
+        'bower_components/*',
+        '.npm/*',
+        '.yarn/*',
+        'dist/*',
+        'build/*',
+        'coverage/*'
+    ],
+    'python': [
+        '*.pyc',
+        '*.pyo',
+        '*.pyd',
+        '.Python',
+        'env/*',
+        'venv/*',
+        '.env/*',
+        '.venv/*',
+        'pip-log.txt',
+        'pip-delete-this-directory.txt',
+        '.tox/*',
+        '.coverage',
+        '.coverage.*',
+        'htmlcov/*',
+        '*.egg-info/*',
+        'dist/*',
+        'build/*',
+        'eggs/*',
+        'lib/*',
+        'lib64/*',
+        'parts/*',
+        'sdist/*',
+        'var/*',
+        '*.egg'
+    ],
+    'java': [
+        '*.class',
+        '*.jar',
+        '*.war',
+        '*.ear',
+        '*.nar',
+        'target/*',
+        '.gradle/*',
+        'build/*',
+        'out/*',
+        '.idea/*',
+        '*.iml',
+        '*.iws',
+        '*.ipr',
+        'gradle-app.setting'
+    ],
+    'dotnet': [
+        'bin/*',
+        'obj/*',
+        '*.suo',
+        '*.user',
+        '*.userosscache',
+        '*.sln.docstates',
+        '[Dd]ebug/*',
+        '[Rr]elease/*',
+        'x64/*',
+        'x86/*',
+        '[Aa][Rr][Mm]/*',
+        '[Aa][Rr][Mm]64/*',
+        'bld/*',
+        '[Bb]in/*',
+        '[Oo]bj/*',
+        '[Ll]og/*',
+        '.vs/*'
+    ]
+}
 
 # Comment patterns for different languages
 COMMENT_PATTERNS = {
     'py': [r'#.*', r'""".*?"""', r"'''.*?'''"],
-    'js|jsx|ts|tsx|java|c|cpp|h|hpp|cs|go|php|swift|kt|rs|scala': [r'//.*', r'/\*.*?\*/'],
+    'js|jsx|ts|tsx|java|c|cpp|h|hpp|cs|go|php|swift|kt|rs|scala|dart': [r'//.*', r'/\*.*?\*/'],  # Added dart to this pattern
     'rb': [r'#.*', r'=begin.*?=end'],
     'html': [r'<!--.*?-->'],
     'css|scss|sass|less': [r'/\*.*?\*/', r'//.*'],
@@ -139,6 +234,47 @@ def find_git_root(path):
         current = os.path.dirname(current)
     return None
 
+def load_ignore_patterns(project_path):
+    """Load ignore patterns from .codeanalyzerignore file and detect project type"""
+    ignore_patterns = set(DEFAULT_IGNORE_PATTERNS['common'])
+    
+    # Detect project type and add relevant patterns
+    if os.path.exists(os.path.join(project_path, 'package.json')):
+        ignore_patterns.update(DEFAULT_IGNORE_PATTERNS['node'])
+    if os.path.exists(os.path.join(project_path, 'requirements.txt')) or \
+       os.path.exists(os.path.join(project_path, 'setup.py')):
+        ignore_patterns.update(DEFAULT_IGNORE_PATTERNS['python'])
+    if os.path.exists(os.path.join(project_path, 'pom.xml')) or \
+       os.path.exists(os.path.join(project_path, 'build.gradle')):
+        ignore_patterns.update(DEFAULT_IGNORE_PATTERNS['java'])
+    if glob.glob(os.path.join(project_path, '*.csproj')) or \
+       glob.glob(os.path.join(project_path, '*.sln')):
+        ignore_patterns.update(DEFAULT_IGNORE_PATTERNS['dotnet'])
+    
+    # Load custom ignore patterns from .codeanalyzerignore
+    ignore_file = os.path.join(project_path, '.codeanalyzerignore')
+    if os.path.exists(ignore_file):
+        with open(ignore_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    ignore_patterns.add(line)
+    
+    return ignore_patterns
+
+def should_ignore_file(file_path, base_path, ignore_patterns):
+    """Check if a file should be ignored based on ignore patterns"""
+    rel_path = os.path.relpath(file_path, base_path)
+    
+    # Convert path to forward slashes for consistent pattern matching
+    rel_path = rel_path.replace(os.sep, '/')
+    
+    for pattern in ignore_patterns:
+        if fnmatch.fnmatch(rel_path, pattern) or \
+           fnmatch.fnmatch(os.path.basename(rel_path), pattern):
+            return True
+    return False
+
 def analyze_project(project_path, extensions=None, exclude_dirs=None):
     """Analyze all code files in the project directory"""
     if extensions is None:
@@ -154,11 +290,55 @@ def analyze_project(project_path, extensions=None, exclude_dirs=None):
         project_path = git_root
         print(f"Found git root at: {git_root}")
     
-    # Statistics
-    total_files = 0
-    total_loc = 0
-    total_tokens = 0
-    stats_by_ext = defaultdict(lambda: {'files': 0, 'loc': 0, 'tokens': 0})
+    # Load ignore patterns
+    ignore_patterns = load_ignore_patterns(project_path)
+    
+    # Statistics for both production and test code
+    stats = {
+        'production': {
+            'total_files': 0,
+            'total_loc': 0,
+            'total_tokens': 0,
+            'stats_by_ext': defaultdict(lambda: {'files': 0, 'loc': 0, 'tokens': 0}),
+            'top_files': []
+        },
+        'test': {
+            'total_files': 0,
+            'total_loc': 0,
+            'total_tokens': 0,
+            'stats_by_ext': defaultdict(lambda: {'files': 0, 'loc': 0, 'tokens': 0}),
+            'top_files': []
+        }
+    }
+    
+    # Common test file/directory patterns
+    test_patterns = [
+        r'test[s]?$',  # test, tests directories
+        r'spec[s]?$',   # spec, specs directories
+        r'__tests?__',  # __test__, __tests__ directories
+        r'.*[._-]tests?[._-].*',  # files containing .test., _test_, etc.
+        r'.*[._-]specs?[._-].*',  # files containing .spec., _spec_, etc.
+        r'test_.*\..*$',  # files starting with test_
+        r'.*_test\..*$',  # files ending with _test
+        r'.*\.tests?\.',  # .test. in filename
+        r'.*\.spec\.',    # .spec. in filename
+    ]
+    
+    def is_test_file(file_path, file_name):
+        """Determine if a file is a test file based on its path and name"""
+        # Check if file is in a test directory
+        path_parts = file_path.split(os.sep)
+        for part in path_parts:
+            for pattern in test_patterns:
+                if re.match(pattern, part, re.IGNORECASE):
+                    return True
+        
+        # Check if the file name matches test patterns
+        for pattern in test_patterns:
+            if re.match(pattern, file_name, re.IGNORECASE):
+                return True
+        
+        return False
     
     # Walk through the project directory
     for root, dirs, files in os.walk(project_path):
@@ -166,50 +346,69 @@ def analyze_project(project_path, extensions=None, exclude_dirs=None):
         dirs[:] = [d for d in dirs if d not in exclude_dirs and not d.startswith('.')]
         
         for file in files:
+            file_path = os.path.join(root, file)
+            
+            # Skip ignored files
+            if should_ignore_file(file_path, project_path, ignore_patterns):
+                continue
+                
             file_ext = os.path.splitext(file)[1].lower()
             if file_ext in extensions:
-                file_path = os.path.join(root, file)
                 loc, tokens, _ = analyze_file(file_path)
                 
                 if loc > 0:  # Only count non-empty files
-                    total_files += 1
-                    total_loc += loc
-                    total_tokens += tokens
+                    # Determine if this is a test file
+                    is_test = is_test_file(file_path, file)
+                    category = 'test' if is_test else 'production'
                     
-                    stats_by_ext[file_ext]['files'] += 1
-                    stats_by_ext[file_ext]['loc'] += loc
-                    stats_by_ext[file_ext]['tokens'] += tokens
+                    # Update statistics
+                    stats[category]['total_files'] += 1
+                    stats[category]['total_loc'] += loc
+                    stats[category]['total_tokens'] += tokens
+                    
+                    stats[category]['stats_by_ext'][file_ext]['files'] += 1
+                    stats[category]['stats_by_ext'][file_ext]['loc'] += loc
+                    stats[category]['stats_by_ext'][file_ext]['tokens'] += tokens
+                    
+                    # Track this file for top files list
+                    rel_path = os.path.relpath(file_path, project_path)
+                    stats[category]['top_files'].append((rel_path, tokens, loc))
+                    # Keep only top 10 files by token count
+                    stats[category]['top_files'].sort(key=lambda x: x[1], reverse=True)
+                    stats[category]['top_files'] = stats[category]['top_files'][:10]
     
-    return {
-        'total_files': total_files,
-        'total_loc': total_loc,
-        'total_tokens': total_tokens,
-        'stats_by_ext': dict(stats_by_ext)
-    }
+    return stats
 
 def format_number(num):
     """Format a number with commas as thousands separators"""
     return f"{num:,}"
 
-def print_results(results):
-    """Print the analysis results in a readable format"""
-    print("\n" + "="*80)
-    print(f"PROJECT CODE ANALYSIS SUMMARY")
-    print("="*80)
+def print_category_results(category_name, stats, models):
+    """Print results for a specific category (production/test)"""
+    print(f"\n{category_name} Code Analysis:")
+    print("-"*80)
     
-    print(f"\nTotal Files: {format_number(results['total_files'])}")
-    print(f"Total Lines of Code: {format_number(results['total_loc'])}")
-    print(f"Total Tokens: {format_number(results['total_tokens'])}")
+    print(f"Total Files: {format_number(stats['total_files'])}")
+    print(f"Total Lines of Code: {format_number(stats['total_loc'])}")
+    print(f"Total Tokens: {format_number(stats['total_tokens'])}")
     
-    # Calculate token usage for different models
-    gpt4_8k = min(100, results['total_tokens'] / 8000 * 100)
-    gpt4_32k = min(100, results['total_tokens'] / 32000 * 100)
-    claude_100k = min(100, results['total_tokens'] / 100000 * 100)
+    print("\nContext Window Usage:")
+    for provider, provider_models in models.items():
+        print(f"\n{provider}:")
+        for model_name, context_size in provider_models.items():
+            percentage = min(100, stats['total_tokens'] / context_size * 100)
+            print(f"  - {model_name:<20} {percentage:.1f}% of context window")
     
-    print(f"\nContext Window Usage:")
-    print(f"  - GPT-4 (8K):      {gpt4_8k:.1f}% of context window")
-    print(f"  - GPT-4 (32K):     {gpt4_32k:.1f}% of context window")
-    print(f"  - Claude (100K):   {claude_100k:.1f}% of context window")
+    print("\nTop 10 Files by Token Count:")
+    print("-"*80)
+    print(f"{'File':<50} {'Tokens':<12} {'Lines':<10} {'% of Total':<10}")
+    print("-"*80)
+    
+    for file_path, tokens, loc in stats['top_files']:
+        percent = tokens / stats['total_tokens'] * 100 if stats['total_tokens'] > 0 else 0
+        # Truncate long file paths with ellipsis
+        truncated_path = file_path if len(file_path) <= 47 else '...' + file_path[-44:]
+        print(f"{truncated_path:<50} {format_number(tokens):<12} {format_number(loc):<10} {percent:.1f}%")
     
     print("\nBreakdown by File Type:")
     print("-"*80)
@@ -218,14 +417,60 @@ def print_results(results):
     
     # Sort by token count (descending)
     sorted_exts = sorted(
-        results['stats_by_ext'].items(),
+        stats['stats_by_ext'].items(),
         key=lambda x: x[1]['tokens'],
         reverse=True
     )
     
-    for ext, stats in sorted_exts:
-        percent = stats['tokens'] / results['total_tokens'] * 100 if results['total_tokens'] > 0 else 0
-        print(f"{ext:<10} {format_number(stats['files']):<10} {format_number(stats['loc']):<15} {format_number(stats['tokens']):<15} {percent:.1f}%")
+    for ext, ext_stats in sorted_exts:
+        percent = ext_stats['tokens'] / stats['total_tokens'] * 100 if stats['total_tokens'] > 0 else 0
+        print(f"{ext:<10} {format_number(ext_stats['files']):<10} {format_number(ext_stats['loc']):<15} {format_number(ext_stats['tokens']):<15} {percent:.1f}%")
+
+def print_results(results):
+    """Print the analysis results in a readable format"""
+    print("\n" + "="*80)
+    print(f"PROJECT CODE ANALYSIS SUMMARY")
+    print("="*80)
+    
+    # Calculate combined totals
+    total_files = results['production']['total_files'] + results['test']['total_files']
+    total_loc = results['production']['total_loc'] + results['test']['total_loc']
+    total_tokens = results['production']['total_tokens'] + results['test']['total_tokens']
+    
+    print(f"\nOverall Statistics:")
+    print(f"Total Files: {format_number(total_files)}")
+    print(f"Total Lines of Code: {format_number(total_loc)}")
+    print(f"Total Tokens: {format_number(total_tokens)}")
+    
+    # Print production/test code ratio
+    prod_ratio = (results['production']['total_tokens'] / total_tokens * 100) if total_tokens > 0 else 0
+    test_ratio = (results['test']['total_tokens'] / total_tokens * 100) if total_tokens > 0 else 0
+    print(f"\nCode Distribution:")
+    print(f"Production Code: {prod_ratio:.1f}%")
+    print(f"Test Code: {test_ratio:.1f}%")
+    
+    # Define models and their context window sizes
+    models = {
+        "OpenAI Models": {
+            "GPT-3.5 Turbo (4K)": 4000,
+            "GPT-3.5 Turbo (16K)": 16000,
+            "GPT-4o (128K)": 128000,
+            "GPT-4 Turbo (128K)": 128000,
+            "GPT-4 (8K)": 8000,
+            "GPT-4 (32K)": 32000,
+        },
+        "Anthropic Models": {
+            "Claude 3 Haiku (200K)": 200000,
+            "Claude 3 Sonnet (200K)": 200000,
+            "Claude 3 Opus (200K)": 200000,
+            "Claude 3.5 Sonnet (200K)": 200000,
+            "Claude 2 (100K)": 100000,
+        }
+    }
+    
+    # Print detailed results for production and test code separately
+    print_category_results("Production", results['production'], models)
+    print_category_results("Test", results['test'], models)
     
     print("="*80)
 
@@ -237,6 +482,8 @@ def main():
                         help='File extensions to analyze (default: common programming languages)')
     parser.add_argument('--exclude', '-x', nargs='+',
                         help='Directories to exclude (default: common build and dependency directories)')
+    parser.add_argument('--include-tests', action='store_true',
+                        help='Include test files in the main analysis (default: separate test analysis)')
     
     args = parser.parse_args()
     
